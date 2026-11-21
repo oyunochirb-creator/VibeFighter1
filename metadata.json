@@ -1,0 +1,6 @@
+{
+  "name": "Vibe Fighter 3D",
+  "description": "3D Martial Arts Arena Fighter featuring 68 world styles, 6 3D stages, and signature ultimates built with Three.js",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

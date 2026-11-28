@@ -98,6 +98,10 @@ export class UIOverlay3D {
     cutInTitle: HTMLElement;
     cutInSub: HTMLElement;
     ultBanner: HTMLElement;
+    winnerBanner: HTMLElement;
+    winnerBannerTitle: HTMLElement;
+    winnerBannerSub: HTMLElement;
+    winnerBannerName: HTMLElement;
     matchOverModal: HTMLElement;
     matchOverWinner: HTMLElement;
   } | null = null;
@@ -410,6 +414,14 @@ export class UIOverlay3D {
         </div>
         <div class="vf3d-ult-banner" data-ref="ult-banner" hidden></div>
 
+        <div class="vf3d-winner-banner" data-ref="winner-banner" hidden>
+          <div class="vf3d-winner-banner__ribbon">
+            <span class="vf3d-winner-banner__tag" data-ref="winner-banner-sub"></span>
+            <strong class="vf3d-winner-banner__title" data-ref="winner-banner-title">WINNER</strong>
+            <div class="vf3d-winner-banner__name" data-ref="winner-banner-name"></div>
+          </div>
+        </div>
+
         <div class="vf3d-cutin" data-ref="cutin" hidden>
           <strong data-ref="cutin-title"></strong>
           <span data-ref="cutin-sub"></span>
@@ -466,6 +478,10 @@ export class UIOverlay3D {
       cutInTitle: this.root.querySelector('[data-ref="cutin-title"]')!,
       cutInSub: this.root.querySelector('[data-ref="cutin-sub"]')!,
       ultBanner: this.root.querySelector('[data-ref="ult-banner"]')!,
+      winnerBanner: this.root.querySelector('[data-ref="winner-banner"]')!,
+      winnerBannerTitle: this.root.querySelector('[data-ref="winner-banner-title"]')!,
+      winnerBannerSub: this.root.querySelector('[data-ref="winner-banner-sub"]')!,
+      winnerBannerName: this.root.querySelector('[data-ref="winner-banner-name"]')!,
       matchOverModal: this.root.querySelector('[data-ref="match-over"]')!,
       matchOverWinner: this.root.querySelector('[data-ref="winner-text"]')!
     };
@@ -528,6 +544,24 @@ export class UIOverlay3D {
       r.ultBanner.hidden = true;
     }
 
+    if (snap.winnerBanner) {
+      const wasHidden = r.winnerBanner.hidden;
+      const winLabel = fighterLabel(snap.winnerBanner.side === 1 ? p1Name : p2Name);
+      r.winnerBannerTitle.textContent = snap.winnerBanner.title;
+      r.winnerBannerSub.textContent = snap.winnerBanner.subtitle;
+      r.winnerBannerName.textContent = `${winLabel.name.toUpperCase()} · P${snap.winnerBanner.side}`;
+      r.winnerBanner.style.setProperty('--winner-c', snap.winnerBanner.color);
+      r.winnerBanner.hidden = false;
+      if (wasHidden) {
+        r.winnerBanner.classList.remove('is-animating');
+        void r.winnerBanner.offsetWidth;
+        r.winnerBanner.classList.add('is-animating');
+      }
+    } else {
+      r.winnerBanner.hidden = true;
+      r.winnerBanner.classList.remove('is-animating');
+    }
+
     if (snap.superCutIn) {
       r.cutIn.hidden = false;
       r.cutIn.style.borderColor = snap.superCutIn.color;
@@ -539,8 +573,8 @@ export class UIOverlay3D {
 
     if (snap.phase === 'matchOver' && snap.winnerSide !== null) {
       r.matchOverModal.hidden = false;
-      r.matchOverWinner.textContent =
-        snap.winnerSide === 1 ? `${p1Name.toUpperCase()} WINS!` : `${p2Name.toUpperCase()} WINS!`;
+      const champ = fighterLabel(snap.winnerSide === 1 ? p1Name : p2Name);
+      r.matchOverWinner.textContent = `${champ.name.toUpperCase()} WINS!`;
     } else {
       r.matchOverModal.hidden = true;
     }

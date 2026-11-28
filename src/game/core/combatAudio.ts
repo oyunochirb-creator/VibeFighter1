@@ -142,29 +142,50 @@ export function playTriangleTapSfx(settings: GameSettings): void {
 }
 
 /**
- * Speaks "Knock Out!" in a deep, gravelly announcer voice + sub-bass boom
- * when Bayasaa finishes the opponent with the 540 Roundhouse Kick (or submission KO).
+ * Speaks "Knock Out!" in a deep bass announcer voice layered with a dual
+ * sub-bass chest boom when a fighter wins by KO.
  */
-export function playKnockOutVoice(settings: GameSettings): void {
+export function playKnockOutVoice(settings: GameSettings, phrase = 'Knock Out!'): void {
   const volume = getEffectiveVolume(0.95, 'sfx', settings);
   if (volume <= 0) {
     return;
   }
 
-  // Deep bass impact chord
+  // Heavy dual sub-bass chest boom ("Knock" + "Out!")
   const ctx = getCtx();
   if (ctx) {
     const now = ctx.currentTime;
-    const boom = ctx.createOscillator();
-    const boomGain = ctx.createGain();
-    boom.type = 'triangle';
-    boom.frequency.setValueAtTime(110, now);
-    boom.frequency.exponentialRampToValueAtTime(32, now + 0.55);
-    boomGain.gain.setValueAtTime(Math.min(0.6, volume * 0.65), now);
-    boomGain.gain.exponentialRampToValueAtTime(0.001, now + 0.58);
-    boom.connect(boomGain).connect(ctx.destination);
-    boom.start(now);
-    boom.stop(now + 0.6);
+
+    const triggerBoom = (startOffset: number, startHz: number, endHz: number, dur: number, amp: number): void => {
+      const start = now + startOffset;
+      const sub = ctx.createOscillator();
+      const subGain = ctx.createGain();
+      sub.type = 'sine';
+      sub.frequency.setValueAtTime(startHz, start);
+      sub.frequency.exponentialRampToValueAtTime(endHz, start + dur);
+      subGain.gain.setValueAtTime(Math.min(0.68, volume * amp), start);
+      subGain.gain.exponentialRampToValueAtTime(0.001, start + dur);
+      sub.connect(subGain).connect(ctx.destination);
+      sub.start(start);
+      sub.stop(start + dur + 0.02);
+
+      const chest = ctx.createOscillator();
+      const lpf = ctx.createBiquadFilter();
+      const chestGain = ctx.createGain();
+      chest.type = 'sawtooth';
+      chest.frequency.setValueAtTime(startHz * 0.82, start);
+      chest.frequency.exponentialRampToValueAtTime(endHz, start + dur * 0.85);
+      lpf.type = 'lowpass';
+      lpf.frequency.setValueAtTime(210, start);
+      chestGain.gain.setValueAtTime(Math.min(0.32, volume * amp * 0.45), start);
+      chestGain.gain.exponentialRampToValueAtTime(0.001, start + dur * 0.9);
+      chest.connect(lpf).connect(chestGain).connect(ctx.destination);
+      chest.start(start);
+      chest.stop(start + dur);
+    };
+
+    triggerBoom(0, 86, 26, 0.65, 0.72);
+    triggerBoom(0.34, 72, 24, 0.58, 0.58);
   }
 
   if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
@@ -174,15 +195,15 @@ export function playKnockOutVoice(settings: GameSettings): void {
   try {
     const synth = window.speechSynthesis;
     synth.cancel();
-    const utterance = new SpeechSynthesisUtterance('Knock Out!');
+    const utterance = new SpeechSynthesisUtterance(phrase);
     utterance.lang = 'en-US';
-    utterance.pitch = 0.22; // Deep bass male announcer tone
-    utterance.rate = 0.82;
+    utterance.pitch = 0.08; // Ultra-deep bass male announcer tone
+    utterance.rate = 0.74;
     utterance.volume = Math.min(1, volume);
 
     const voices = synth.getVoices();
     const preferredVoice =
-      voices.find((v) => /male|david|daniel|alex|fred|bruce|google uk english male/i.test(v.name)) ??
+      voices.find((v) => /google uk english male|mark|david|daniel|alex|fred|bruce|male/i.test(v.name)) ??
       voices.find((v) => v.lang.startsWith('en'));
     if (preferredVoice) {
       utterance.voice = preferredVoice;

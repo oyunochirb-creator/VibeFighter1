@@ -13,17 +13,18 @@ import {
 import type { Store } from '../game/store';
 import type { GameSettings } from '../game/types';
 
-export type MusicMood = 'preFight' | 'fight';
+export type MusicMood = 'preFight' | 'fight' | 'victory';
 
 /**
- * Unified Three.js/DOM audio controller that plays the pre-fight & live-fight
- * music tracks from `/assets/audio/music/*.m4a`, UI confirm cues, and WebAudio
- * combat SFX synchronized with `settingsStore`.
+ * Unified Three.js/DOM audio controller that plays pre-fight, live-fight, and
+ * post-KO victory music tracks, UI confirm cues, and WebAudio combat SFX
+ * synchronized with `settingsStore`.
  */
 export class Game3DAudio {
   private readonly settingsStore: Store<GameSettings>;
   private readonly preFightEl: HTMLAudioElement | null = null;
   private readonly fightEl: HTMLAudioElement | null = null;
+  private readonly victoryEl: HTMLAudioElement | null = null;
   private readonly uiConfirmUrl: string;
   private sfxCtx: AudioContext | null = null;
   private unlocked = false;
@@ -35,6 +36,7 @@ export class Game3DAudio {
 
     const preAsset = STARTER_AUDIO_ASSETS.find((a) => a.key === AUDIO_KEYS.preFightMusic);
     const fightAsset = STARTER_AUDIO_ASSETS.find((a) => a.key === AUDIO_KEYS.fightMusic);
+    const victoryAsset = STARTER_AUDIO_ASSETS.find((a) => a.key === AUDIO_KEYS.victoryMusic);
     const confirmAsset = STARTER_AUDIO_ASSETS.find((a) => a.key === AUDIO_KEYS.uiConfirm);
     this.uiConfirmUrl = confirmAsset?.url ?? '/assets/audio/sfx/ui-confirm.mp3';
 
@@ -48,6 +50,11 @@ export class Game3DAudio {
         this.fightEl = new Audio(fightAsset.url);
         this.fightEl.loop = true;
         this.fightEl.preload = 'auto';
+      }
+      if (victoryAsset) {
+        this.victoryEl = new Audio(victoryAsset.url);
+        this.victoryEl.loop = true;
+        this.victoryEl.preload = 'auto';
       }
     }
 
@@ -79,13 +86,20 @@ export class Game3DAudio {
 
   syncMusic(): void {
     const settings = this.settingsStore.getState();
-    const vol = getEffectiveVolume(0.45, 'music', settings);
-    const activeEl = this.currentMood === 'preFight' ? this.preFightEl : this.fightEl;
-    const inactiveEl = this.currentMood === 'preFight' ? this.fightEl : this.preFightEl;
+    const baseVol = this.currentMood === 'victory' ? 0.5 : 0.45;
+    const vol = getEffectiveVolume(baseVol, 'music', settings);
+    const activeEl =
+      this.currentMood === 'preFight'
+        ? this.preFightEl
+        : this.currentMood === 'fight'
+          ? this.fightEl
+          : this.victoryEl;
 
-    if (inactiveEl && !inactiveEl.paused) {
-      inactiveEl.pause();
-      inactiveEl.currentTime = 0;
+    for (const track of [this.preFightEl, this.fightEl, this.victoryEl]) {
+      if (track && track !== activeEl && !track.paused) {
+        track.pause();
+        track.currentTime = 0;
+      }
     }
 
     if (!activeEl) {
@@ -172,8 +186,8 @@ export class Game3DAudio {
     playTriangleTapSfx(this.settingsStore.getState());
   }
 
-  playKnockOut(): void {
-    playKnockOutVoice(this.settingsStore.getState());
+  playKnockOut(phrase = 'Knock Out!'): void {
+    playKnockOutVoice(this.settingsStore.getState(), phrase);
   }
 
   playAnnouncerPhrase(phrase: string): void {
@@ -214,5 +228,6 @@ export class Game3DAudio {
     this.unsubscribe();
     this.preFightEl?.pause();
     this.fightEl?.pause();
+    this.victoryEl?.pause();
   }
 }

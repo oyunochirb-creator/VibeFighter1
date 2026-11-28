@@ -46,6 +46,7 @@ export interface MatchHudSnapshot {
   bannerSubtext: string;
   superCutIn: { title: string; subtitle: string; color: string } | null;
   ultimateBanner: string | null;
+  winnerBanner: { side: 1 | 2; title: string; subtitle: string; color: string } | null;
   winnerSide: 1 | 2 | null;
 }
 
@@ -287,11 +288,13 @@ export class Match3DSimulation {
   private p1Wins = 0;
   private p2Wins = 0;
   private winnerSide: 1 | 2 | null = null;
+  private roundWinnerSide: 1 | 2 | null = null;
   private roundTimeSec = ROUND_SECONDS;
   private bannerText = '';
   private bannerSubtext = '';
   private superCutIn: MatchHudSnapshot['superCutIn'] = null;
   private ultimateBanner: string | null = null;
+  private winnerBanner: MatchHudSnapshot['winnerBanner'] = null;
   private callbacks: PendingCallback[] = [];
   private cameraShake = 0;
   private koSlowMoTimer = 0;
@@ -415,8 +418,10 @@ export class Match3DSimulation {
     this.koSlowMoPending = false;
     this.rageCamTimer = 0;
     this.phase = 'intro';
+    this.roundWinnerSide = null;
     this.superCutIn = null;
     this.ultimateBanner = null;
+    this.winnerBanner = null;
     this.bannerText = `ROUND ${this.roundNumber}`;
     this.bannerSubtext = this.roundNumber === 1 ? 'GET READY FOR THE NEXT BATTLE' : 'IRON FIST SHOWDOWN';
     this.audio.setMusicMood('preFight');
@@ -1397,15 +1402,15 @@ export class Match3DSimulation {
       return;
     }
     if (this.p1.defeated && this.p2.defeated) {
-      this.audio.playAnnouncerPhrase('Double Knock Out!');
+      this.audio.playKnockOut('Double Knock Out!');
       this.endRound(null, 'DOUBLE K.O.!');
     } else if (this.p2.defeated) {
       this.p1Wins += 1;
-      this.audio.playAnnouncerPhrase('Knock Out!');
+      this.audio.playKnockOut('Knock Out!');
       this.endRound(1, 'K.O.!');
     } else {
       this.p2Wins += 1;
-      this.audio.playAnnouncerPhrase('Knock Out!');
+      this.audio.playKnockOut('Knock Out!');
       this.endRound(2, 'K.O.!');
     }
   }
@@ -1429,11 +1434,46 @@ export class Match3DSimulation {
 
   private endRound(roundWinner: 1 | 2 | null, label: string): void {
     this.phase = 'roundEnd';
+    this.roundWinnerSide = roundWinner;
     this.bannerText = label;
+    this.bannerSubtext = '';
+    this.winnerBanner = null;
     this.cameraShake = 0.45;
-    this.audio.setMusicMood('preFight');
+    this.audio.setMusicMood(roundWinner !== null ? 'victory' : 'preFight');
 
-    this.schedule(1.9, () => {
+    if (roundWinner !== null) {
+      const winner = roundWinner === 1 ? this.p1 : this.p2;
+      const isMatchDecider = this.p1Wins >= ROUNDS_TO_WIN || this.p2Wins >= ROUNDS_TO_WIN;
+      const winColor = `#${(winner.meta?.primaryColor ?? 0xfacc15).toString(16).padStart(6, '0')}`;
+      this.vfx.spawnShockwave(winner.x, 0.12, 0xfacc15, 0xfef08a, 2.6);
+
+      this.schedule(0.42, () => {
+        if (this.phase !== 'roundEnd') {
+          return;
+        }
+        this.bannerText = '';
+        this.winnerBanner = {
+          side: roundWinner,
+          title: 'WINNER',
+          subtitle: isMatchDecider ? 'MATCH CHAMPION' : 'ROUND VICTORY',
+          color: winColor
+        };
+      });
+
+      this.schedule(1.55, () => {
+        if (this.phase !== 'roundEnd') {
+          return;
+        }
+        if (typeof window !== 'undefined' && window.speechSynthesis?.speaking) {
+          return;
+        }
+        this.audio.playAnnouncerPhrase('Winner!');
+      });
+    }
+
+    const totalEndDelay = roundWinner !== null ? 2.45 : 1.9;
+    this.schedule(totalEndDelay, () => {
+      this.winnerBanner = null;
       if (this.p1Wins >= ROUNDS_TO_WIN || this.p2Wins >= ROUNDS_TO_WIN) {
         this.phase = 'matchOver';
         this.winnerSide = this.p1Wins >= ROUNDS_TO_WIN ? 1 : 2;
@@ -1455,7 +1495,10 @@ export class Match3DSimulation {
 
     if (f.defeated) {
       pose = 'ko';
-    } else if (this.phase === 'matchOver' && this.winnerSide === f.side) {
+    } else if (
+      (this.phase === 'roundEnd' && this.roundWinnerSide === f.side) ||
+      (this.phase === 'matchOver' && this.winnerSide === f.side)
+    ) {
       pose = 'victory';
     } else if (f.grappleMode !== 'none') {
       pose = f.grappleMode;
@@ -1490,24 +1533,30 @@ export class Match3DSimulation {
       pose = dir === f.facing ? 'walkForward' : 'walkBackward';
     }
 
-    const showAura = Boolean(f.activeMove || f.icyChargeTimer > 0 || f.duckChokeTimer > 0 || f.eagleSlamTimer > 0);
+    const isVictoryPose = pose === 'victory';
+    const showAura = Boolean(
+      isVictoryPose || f.activeMove || f.icyChargeTimer > 0 || f.duckChokeTimer > 0 || f.eagleSlamTimer > 0
+    );
     f.rig.setAuraActive(
       showAura,
-      f.icyChargeTimer > 0 ? 0xbae6fd : f.meta?.primaryColor ?? 0x38bdf8,
-      0.75
+      isVictoryPose ? 0xfacc15 : f.icyChargeTimer > 0 ? 0xbae6fd : f.meta?.primaryColor ?? 0x38bdf8,
+      isVictoryPose ? 0.9 : 0.75
     );
     f.rig.setRageActive(isFighterInRage(f), this.elapsedMs / 1000);
     f.rig.updatePose(dt, pose, progress, this.elapsedMs / 1000, f.y, f.scale);
   }
 
   private updateCamera(dt: number, camera: THREE.PerspectiveCamera): void {
-    const midX = (this.p1.x + this.p2.x) * 0.5;
+    const activeWinner = this.phase === 'roundEnd' ? this.roundWinnerSide : this.phase === 'matchOver' ? this.winnerSide : null;
+    const winnerFighter = activeWinner === 1 ? this.p1 : activeWinner === 2 ? this.p2 : null;
+    const midX = winnerFighter ? winnerFighter.x * 0.65 + (this.p1.x + this.p2.x) * 0.175 : (this.p1.x + this.p2.x) * 0.5;
     const midZ = (this.p1.z + this.p2.z) * 0.5;
     const span = Math.abs(this.p1.x - this.p2.x);
     const grappleZoom = this.p1.grappleMode !== 'none' || this.superCutIn ? -1.45 : 0;
     const slowMoZoom = this.koSlowMoTimer > 0 ? -1.65 : 0;
-    const targetZ = THREE.MathUtils.clamp(5.6 + span * 0.42 + grappleZoom + slowMoZoom + midZ * 0.5, 4.1, 9.4);
-    const targetY = this.phase === 'matchOver' ? 2.1 : this.koSlowMoTimer > 0 ? 1.45 : 1.75 + span * 0.06;
+    const victoryZoom = winnerFighter ? -0.95 : 0;
+    const targetZ = THREE.MathUtils.clamp(5.6 + span * 0.42 + grappleZoom + slowMoZoom + victoryZoom + midZ * 0.5, 4.1, 9.4);
+    const targetY = this.phase === 'matchOver' || winnerFighter ? 1.95 : this.koSlowMoTimer > 0 ? 1.45 : 1.75 + span * 0.06;
 
     // Dramatic Tekken 7 camera sweep during KO Slow-Mo or Rage Art
     let orbitOffsetX = 0;
@@ -1546,6 +1595,7 @@ export class Match3DSimulation {
       bannerSubtext: this.bannerSubtext,
       superCutIn: this.superCutIn,
       ultimateBanner: this.ultimateBanner,
+      winnerBanner: this.winnerBanner,
       winnerSide: this.winnerSide
     };
   }

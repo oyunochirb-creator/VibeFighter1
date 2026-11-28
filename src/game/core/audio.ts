@@ -32,7 +32,8 @@ export interface GeneratedAudioCue {
 export const AUDIO_KEYS = {
   uiConfirm: 'ui-confirm',
   preFightMusic: 'bgm-pre-fight',
-  fightMusic: 'bgm-fight'
+  fightMusic: 'bgm-fight',
+  victoryMusic: 'bgm-victory'
 } as const;
 
 export type AudioKey = (typeof AUDIO_KEYS)[keyof typeof AUDIO_KEYS];
@@ -54,6 +55,14 @@ export const STARTER_AUDIO_ASSETS: StarterAudioAsset[] = [
     0.45,
     true,
     'live battle background music'
+  ),
+  audio(
+    AUDIO_KEYS.victoryMusic,
+    'music',
+    '/assets/audio/music/victory-bgm.m4a',
+    0.5,
+    true,
+    'post-KO victory celebration background music'
   )
 ];
 export const STARTER_AUDIO_CUES: GeneratedAudioCue[] = [

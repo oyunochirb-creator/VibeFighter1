@@ -5,8 +5,11 @@ import { resolveFighterAppearance } from '../game/fighterAppearance';
 import { FIGHTER_CHARACTER_DEFINITIONS } from '../game/hero';
 import { STAGE_DEFINITIONS } from '../game/stageConfig';
 import { WORLD_MARTIAL_ARTS } from '../game/worldMartialArts';
+import type { Game3DAudio } from './audio3d';
+import { Match3DSimulation } from './combat3d';
 import { createFighterRig3D } from './fighterRig3d';
 import { loadFighterSpritePack25D, transformSpriteSheetPixels } from './spriteSheet3d';
+import type { Vfx3DManager } from './vfx3d';
 
 describe('2.5D Fighter Rigs, Face/Outfit Variations, Tekken 7 Poses & Stages Coverage', () => {
   it('preserves all 68 fighters and builds 2.5D rigs supporting all custom & Tekken 7 poses', async () => {
@@ -37,10 +40,95 @@ describe('2.5D Fighter Rigs, Face/Outfit Variations, Tekken 7 Poses & Stages Cov
       rig.updatePose(0.016, 'choker', 0.5, 1.0, 0, 1);
       rig.updatePose(0.016, 'slammed', 0.6, 1.0, 0, 1);
       rig.updatePose(0.016, 'rageArt', 0.5, 1.0, 0, 1);
+      rig.updatePose(0.016, 'victory', 0.5, 1.0, 0, 1);
       rig.updatePose(0.016, 'liverDowned', 0.8, 1.0, 0, 1);
       rig.updatePose(0.016, 'ko', 1.0, 1.0, 0, 1);
     }
 
+    dummyTex.dispose();
+  });
+
+  it('triggers Winner banner and brief victory pose when a player drops to zero health', () => {
+    const dummyTex = new THREE.Texture();
+    const p1Rig = createFighterRig3D('mongol-bokh', dummyTex);
+    const p2Rig = createFighterRig3D('bayasaa', dummyTex);
+
+    const posesSeenP1: string[] = [];
+    const origUpdateP1 = p1Rig.updatePose;
+    p1Rig.updatePose = (dt, pose, progress, elapsedSec, h, scale) => {
+      posesSeenP1.push(pose);
+      origUpdateP1(dt, pose, progress, elapsedSec, h, scale);
+    };
+
+    const noop = () => {};
+    const musicMoods: string[] = [];
+    const koPhrases: string[] = [];
+    const vfxStub = {
+      clear: noop,
+      spawnShockwave: noop,
+      spawnHitSpark: noop,
+      spawnBlockRipple: noop,
+      addCallout: noop,
+      attachTriangleRing: () => noop
+    } as unknown as Vfx3DManager;
+    const audioStub = {
+      setMusicMood: (mood: string) => {
+        musicMoods.push(mood);
+      },
+      playAnnouncerPhrase: noop,
+      playHit: noop,
+      playKnockOut: (phrase = 'Knock Out!') => {
+        koPhrases.push(phrase);
+      },
+      playWhoosh: noop,
+      playJump: noop,
+      playSuperActivate: noop
+    } as unknown as Game3DAudio;
+
+    const sim = new Match3DSimulation(
+      { mode: '1v1', stageId: 'mma-octagon', p1CharacterId: 'mongol-bokh', p2CharacterId: 'bayasaa' },
+      p1Rig,
+      p2Rig,
+      {
+        characterId: 'mongol-bokh',
+        stats: {},
+        combat: {},
+        bounds: { visual: false, collision: false, hit: false, attack: false, guard: false },
+        reverseWalk: false,
+        fillSpecial: false,
+        saveStatus: ''
+      },
+      vfxStub,
+      audioStub
+    );
+
+    const camera = new THREE.PerspectiveCamera(44, 16 / 9, 0.1, 140);
+    // Advance past intro (1.25s) into fighting
+    for (let i = 0; i < 40; i += 1) {
+      sim.update(0.05, camera);
+    }
+    expect(sim.getSnapshot().phase).toBe('fighting');
+
+    // Drop P2's health to 0
+    const internal = sim as unknown as { p2: { health: number } };
+    internal.p2.health = 0;
+
+    // Step through KO detection + 0.85s slow-mo + 0.42s K.O. reveal -> Winner banner
+    let sawWinnerBanner = false;
+    posesSeenP1.length = 0;
+    for (let i = 0; i < 65; i += 1) {
+      sim.update(0.05, camera);
+      const snap = sim.getSnapshot();
+      if (snap.winnerBanner?.title === 'WINNER' && snap.winnerBanner.side === 1) {
+        sawWinnerBanner = true;
+        break;
+      }
+    }
+
+    expect(sawWinnerBanner).toBe(true);
+    expect(posesSeenP1).toContain('victory');
+    expect(koPhrases).toContain('Knock Out!');
+    expect(musicMoods).toContain('victory');
     dummyTex.dispose();
   });
 

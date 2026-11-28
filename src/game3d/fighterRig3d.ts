@@ -300,6 +300,8 @@ export function createFighterRig3D(characterId: string, contactShadowTex: THREE.
   let turntableYaw = 0;
   let isRageOn = false;
   let wasIcyCharge = false;
+  let wasVictory = false;
+  let victoryElapsed = 0;
   let flashOverrideColor: number | null = null;
 
   const setFacing = (facing: 1 | -1): void => {
@@ -333,6 +335,10 @@ export function createFighterRig3D(characterId: string, contactShadowTex: THREE.
       spriteMat.color.setHex(0xffd2d2);
       spriteMat.emissive.setHex(0xff3b3b);
       spriteMat.emissiveIntensity = 0.56;
+    } else if (wasVictory) {
+      spriteMat.color.setHex(0xfffbeb);
+      spriteMat.emissive.setHex(0xfde047);
+      spriteMat.emissiveIntensity = 0.5;
     } else {
       spriteMat.color.setHex(0xffffff);
       spriteMat.emissive.setHex(0xffffff);
@@ -425,6 +431,23 @@ export function createFighterRig3D(characterId: string, contactShadowTex: THREE.
       spritePlane.scale.y = 1;
     }
 
+    let effectiveScale = scale;
+
+    if (pose === 'victory') {
+      if (!wasVictory) {
+        wasVictory = true;
+        victoryElapsed = 0;
+        applyBaseEmissive();
+      }
+      victoryElapsed += dt;
+    } else {
+      if (wasVictory) {
+        wasVictory = false;
+        victoryElapsed = 0;
+        applyBaseEmissive();
+      }
+    }
+
     if (pose === 'icyCharge') {
       rotZ = currentFacing * 0.14;
       wasIcyCharge = true;
@@ -473,10 +496,22 @@ export function createFighterRig3D(characterId: string, contactShadowTex: THREE.
       } else if (pose === 'rageArt') {
         rotZ = -currentFacing * 0.12 * Math.sin(poseProgress * Math.PI);
       } else if (pose === 'victory') {
-        planeY = 0.935 + Math.abs(Math.sin(elapsedSec * 5)) * 0.08;
+        const leapDur = 0.48;
+        if (victoryElapsed < leapDur) {
+          const t = victoryElapsed / leapDur;
+          planeY = 0.935 + Math.sin(t * Math.PI) * 0.28;
+          rotZ = -currentFacing * 0.08 * Math.sin(t * Math.PI);
+          effectiveScale = scale * (1 + 0.08 * Math.sin(t * Math.PI));
+        } else {
+          const swayT = victoryElapsed - leapDur;
+          planeY = 0.935 + Math.abs(Math.sin(swayT * 4.2)) * 0.05;
+          rotZ = -currentFacing * 0.03;
+          effectiveScale = scale * 1.05;
+        }
       }
     }
 
+    model.scale.setScalar(effectiveScale);
     spritePlane.position.y = THREE.MathUtils.damp(spritePlane.position.y, planeY, 18, dt);
     model.rotation.x = THREE.MathUtils.damp(model.rotation.x, rotX, 18, dt);
     model.rotation.y =

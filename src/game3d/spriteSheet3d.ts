@@ -9,15 +9,23 @@ export type SpriteActionKey =
   | 'walk-forward'
   | 'walk-backward'
   | 'crouch'
+  | 'crouch-punch'
   | 'jump'
   | 'block-high'
   | 'block-low'
   | 'hit-high'
   | 'light-punch'
   | 'heavy-kick'
+  | 'sweep'
   | 'special-charge'
   | 'special'
   | 'knockdown';
+
+export interface SpriteFrame25D {
+  canvas: HTMLCanvasElement;
+  /** Lowest opaque pixel row inside this 256x256 cell (0..255). */
+  bottomY: number;
+}
 
 export interface SpriteSheetEntry25D {
   canvas: HTMLCanvasElement;
@@ -26,6 +34,7 @@ export interface SpriteSheetEntry25D {
   rows: number;
   frameRate: number;
   isFallbackPose: boolean;
+  frameList: SpriteFrame25D[];
 }
 
 export interface FighterSpritePack25D {
@@ -45,16 +54,16 @@ const STANDARD_13_ACTIONS = (heavyFile: string, heavyFrames: number, hasDedicate
   { action: 'idle', file: 'idle.png', frames: 12, frameRate: 10 },
   { action: 'walk-forward', file: 'walk-forward.png', frames: 8, frameRate: 10 },
   { action: 'walk-backward', file: 'walk-backward.png', frames: 8, frameRate: 10 },
-  { action: 'crouch', file: 'crouch.png', frames: 5, frameRate: 12 },
+  { action: 'crouch', file: 'crouch.png', frames: 5, frameRate: 14 },
   { action: 'jump', file: 'jump.png', frames: 8, frameRate: 12 },
   { action: 'block-high', file: 'block-high.png', frames: 4, frameRate: 12 },
-  { action: 'block-low', file: 'block-low.png', frames: 4, frameRate: 12 },
+  { action: 'block-low', file: 'block-low.png', frames: 4, frameRate: 14 },
   { action: 'hit-high', file: 'hit-high.png', frames: 6, frameRate: 14 },
   { action: 'light-punch', file: 'light-punch.png', frames: 6, frameRate: 16 },
   { action: 'heavy-kick', file: heavyFile, frames: heavyFrames, frameRate: 14 },
   { action: 'special-charge', file: hasDedicatedSpecial ? 'special-charge.png' : 'crouch.png', frames: 5, frameRate: 14 },
   { action: 'special', file: hasDedicatedSpecial ? 'special.png' : heavyFile, frames: hasDedicatedSpecial ? 12 : heavyFrames, frameRate: 16 },
-  { action: 'knockdown', file: 'knockdown.png', frames: 10, frameRate: 12 }
+  { action: 'knockdown', file: 'knockdown.png', frames: 10, frameRate: 14 }
 ];
 
 const ARCHETYPE_GRID_SPECS: Partial<Record<BaseArchetypeId, GridActionSpec[]>> = {
@@ -84,6 +93,57 @@ const baseSheetCache = new Map<BaseArchetypeId, Promise<Map<SpriteActionKey, Loa
 const characterPackCache = new Map<string, Promise<FighterSpritePack25D>>();
 const canvasSheetCache = new Map<string, SpriteSheetEntry25D>();
 
+const GROUNDED_FEET_Y = 229;
+
+function sliceIsolatedFrames(canvas: HTMLCanvasElement, frames: number, cols: number): SpriteFrame25D[] {
+  const safeFrames = Math.max(1, frames);
+  const safeCols = Math.max(1, cols);
+  const list: SpriteFrame25D[] = [];
+
+  for (let i = 0; i < safeFrames; i += 1) {
+    const col = i % safeCols;
+    const row = Math.floor(i / safeCols);
+    const cell = document.createElement('canvas');
+    cell.width = RAW_CELL;
+    cell.height = RAW_CELL;
+    const ctx = cell.getContext('2d');
+    let bottomY = GROUNDED_FEET_Y;
+
+    if (ctx) {
+      ctx.drawImage(
+        canvas,
+        col * RAW_CELL,
+        row * RAW_CELL,
+        RAW_CELL,
+        RAW_CELL,
+        0,
+        0,
+        RAW_CELL,
+        RAW_CELL
+      );
+      const data = ctx.getImageData(0, 0, RAW_CELL, RAW_CELL).data;
+      let maxY = -1;
+      for (let y = RAW_CELL - 1; y >= 0; y -= 1) {
+        const rowBase = y * RAW_CELL * 4;
+        for (let x = 0; x < RAW_CELL; x += 1) {
+          if (data[rowBase + x * 4 + 3] >= 24) {
+            maxY = y;
+            break;
+          }
+        }
+        if (maxY >= 0) break;
+      }
+      if (maxY >= 0) {
+        bottomY = maxY;
+      }
+    }
+
+    list.push({ canvas: cell, bottomY });
+  }
+
+  return list;
+}
+
 function makeEntryFromCanvas(
   canvas: HTMLCanvasElement,
   frames: number,
@@ -92,13 +152,16 @@ function makeEntryFromCanvas(
   isFallbackPose: boolean
 ): SpriteSheetEntry25D {
   const rows = Math.max(1, Math.ceil(Math.max(1, canvas.height) / RAW_CELL));
+  const safeFrames = Math.max(1, frames);
+  const safeCols = Math.max(1, cols);
   return {
     canvas,
-    frames: Math.max(1, frames),
-    cols: Math.max(1, cols),
+    frames: safeFrames,
+    cols: safeCols,
     rows,
     frameRate,
-    isFallbackPose
+    isFallbackPose,
+    frameList: sliceIsolatedFrames(canvas, safeFrames, safeCols)
   };
 }
 
@@ -112,6 +175,258 @@ function imageToCanvas(img: HTMLImageElement): HTMLCanvasElement {
   c.height = img.naturalHeight || img.height;
   c.getContext('2d')?.drawImage(img, 0, 0);
   return c;
+}
+
+function measureCellBounds(
+  canvas: HTMLCanvasElement,
+  frameIdx: number,
+  cols: number
+): { minY: number; maxY: number; minX: number; maxX: number } {
+  const cx = (frameIdx % cols) * RAW_CELL;
+  const cy = Math.floor(frameIdx / cols) * RAW_CELL;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    return { minY: 30, maxY: GROUNDED_FEET_Y, minX: 64, maxX: 192 };
+  }
+  const data = ctx.getImageData(cx, cy, RAW_CELL, RAW_CELL).data;
+  let minY = RAW_CELL;
+  let maxY = -1;
+  let minX = RAW_CELL;
+  let maxX = -1;
+  for (let ly = 0; ly < RAW_CELL; ly += 1) {
+    const rowOff = ly * RAW_CELL * 4;
+    for (let lx = 0; lx < RAW_CELL; lx += 1) {
+      if (data[rowOff + lx * 4 + 3] >= 28) {
+        if (ly < minY) minY = ly;
+        if (ly > maxY) maxY = ly;
+        if (lx < minX) minX = lx;
+        if (lx > maxX) maxX = lx;
+      }
+    }
+  }
+  if (maxY < 0) {
+    return { minY: 30, maxY: GROUNDED_FEET_Y, minX: 64, maxX: 192 };
+  }
+  return { minY, maxY, minX, maxX };
+}
+
+/**
+ * Synthesizes an authentic 2-foot-grounded athletic crouch/low-guard spritesheet
+ * from frame 0 of `sourceCanvas` (always a solid grounded stance).
+ * Keeps boots/ankles 1:1 pinned to GROUNDED_FEET_Y, bends knees/thighs smoothly,
+ * and drops the crisp un-squashed torso & guard down over the bent knees.
+ */
+function synthesizeTwoFootCrouchData(
+  sourceCanvas: HTMLCanvasElement,
+  sourceCols: number,
+  mode: 'crouch' | 'blockLow' | 'charge'
+): LoadedRawSheetData {
+  const frames = 3;
+  const cols = RAW_COLS;
+  const out = document.createElement('canvas');
+  out.width = cols * RAW_CELL;
+  out.height = RAW_CELL;
+  const ctx = out.getContext('2d');
+  if (!ctx) {
+    return { canvas: sourceCanvas, frames: 1, cols: sourceCols, rows: 1, frameRate: 12, isFallbackPose: false };
+  }
+
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+
+  const b = measureCellBounds(sourceCanvas, 0, sourceCols);
+  const feetY = b.maxY;
+  const bodyH = Math.max(80, feetY - b.minY);
+  const ankleH = Math.max(18, Math.round(bodyH * 0.17));
+  const ankleSrcY = feetY - ankleH;
+  const hipSrcY = b.minY + Math.round(bodyH * 0.56);
+  const legBandH = Math.max(16, ankleSrcY - hipSrcY);
+  const torsoH = Math.max(24, hipSrcY - b.minY);
+  const maxDrop = Math.round(bodyH * (mode === 'crouch' ? 0.165 : 0.155));
+
+  const depthFracs = mode === 'crouch' ? [0.42, 0.78, 1.0] : [0.68, 0.92, 1.0];
+  const ankleDstY = GROUNDED_FEET_Y - ankleH;
+
+  for (let f = 0; f < frames; f += 1) {
+    const cellX = f * RAW_CELL;
+    const frac = depthFracs[f];
+    const drop = Math.round(maxDrop * frac);
+    const hipDstY = hipSrcY + drop + (GROUNDED_FEET_Y - feetY);
+    const bentLegH = Math.max(10, ankleDstY - hipDstY);
+    const leanX = mode === 'blockLow' ? -Math.round(3 * frac) : -Math.round(2 * frac);
+
+    // 1. Boots / ankles pinned 1:1 on the floor at GROUNDED_FEET_Y
+    ctx.drawImage(sourceCanvas, 0, ankleSrcY, RAW_CELL, ankleH, cellX, ankleDstY, RAW_CELL, ankleH);
+
+    // 2. Bent knees / thighs compressed cleanly into bent squat space
+    ctx.drawImage(sourceCanvas, 0, hipSrcY, RAW_CELL, legBandH + 2, cellX + 1, hipDstY, RAW_CELL, bentLegH + 2);
+
+    // 3. Sharp upper torso, arms & head lowered cleanly without distortion
+    ctx.drawImage(
+      sourceCanvas,
+      0,
+      b.minY,
+      RAW_CELL,
+      torsoH + 3,
+      cellX + leanX,
+      hipDstY - torsoH,
+      RAW_CELL,
+      torsoH + 3
+    );
+  }
+
+  return {
+    canvas: out,
+    frames,
+    cols,
+    rows: 1,
+    frameRate: 16,
+    isFallbackPose: false
+  };
+}
+
+/**
+ * Synthesizes a 2-foot-grounded crouch-punch (`crouchLight`) spritesheet by
+ * anchoring crouched bent lower legs at the floor and snapping the upper-body
+ * punch motion from `punchData` down at crouched shoulder height.
+ */
+function synthesizeCrouchPunchData(
+  crouchData: LoadedRawSheetData,
+  punchData: LoadedRawSheetData
+): LoadedRawSheetData {
+  const frames = Math.min(5, Math.max(1, punchData.frames));
+  const cols = RAW_COLS;
+  const out = document.createElement('canvas');
+  out.width = cols * RAW_CELL;
+  out.height = RAW_CELL;
+  const ctx = out.getContext('2d');
+  if (!ctx) {
+    return punchData;
+  }
+
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+
+  const crouchFrameIdx = Math.max(0, crouchData.frames - 1);
+  const crouchCol = crouchFrameIdx % crouchData.cols;
+  const crouchRow = Math.floor(crouchFrameIdx / crouchData.cols);
+  const cb = measureCellBounds(crouchData.canvas, crouchFrameIdx, crouchData.cols);
+  const crouchHipY = cb.minY + Math.round((cb.maxY - cb.minY) * 0.48);
+  const lowerH = Math.max(18, cb.maxY - crouchHipY + 2);
+  const lowerDstY = GROUNDED_FEET_Y - lowerH + 2;
+
+  for (let f = 0; f < frames; f += 1) {
+    const pCol = f % punchData.cols;
+    const pRow = Math.floor(f / punchData.cols);
+    const pb = measureCellBounds(punchData.canvas, f, punchData.cols);
+    const punchHipY = pb.minY + Math.round((pb.maxY - pb.minY) * 0.56);
+    const upperH = Math.max(24, punchHipY - pb.minY + 3);
+    const upperDstY = lowerDstY - upperH + 4;
+    const cellX = f * RAW_CELL;
+
+    // 1. Both crouched legs firmly planted on GROUNDED_FEET_Y
+    ctx.drawImage(
+      crouchData.canvas,
+      crouchCol * RAW_CELL,
+      crouchRow * RAW_CELL + crouchHipY,
+      RAW_CELL,
+      lowerH,
+      cellX,
+      lowerDstY,
+      RAW_CELL,
+      lowerH
+    );
+
+    // 2. Upper torso + extended punch snap lowered to crouched waist
+    ctx.drawImage(
+      punchData.canvas,
+      pCol * RAW_CELL,
+      pRow * RAW_CELL + pb.minY,
+      RAW_CELL,
+      upperH,
+      cellX - 2,
+      upperDstY,
+      RAW_CELL,
+      upperH
+    );
+  }
+
+  return {
+    canvas: out,
+    frames,
+    cols,
+    rows: 1,
+    frameRate: 16,
+    isFallbackPose: false
+  };
+}
+
+/**
+ * Synthesizes a grounded low leg-sweep sheet anchored firmly on the floor
+ * so sweep strikes crouch low without clipping underground.
+ */
+function synthesizeSweepData(kickData: LoadedRawSheetData, crouchData: LoadedRawSheetData): LoadedRawSheetData {
+  const frames = Math.min(5, Math.max(1, kickData.frames));
+  const cols = RAW_COLS;
+  const out = document.createElement('canvas');
+  out.width = cols * RAW_CELL;
+  out.height = RAW_CELL;
+  const ctx = out.getContext('2d');
+  if (!ctx) {
+    return kickData;
+  }
+
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+
+  const crouchFrameIdx = Math.max(0, crouchData.frames - 1);
+  const cCol = crouchFrameIdx % crouchData.cols;
+  const cRow = Math.floor(crouchFrameIdx / crouchData.cols);
+
+  for (let f = 0; f < frames; f += 1) {
+    const cellX = f * RAW_CELL;
+    if (f === 0) {
+      ctx.drawImage(
+        crouchData.canvas,
+        cCol * RAW_CELL,
+        cRow * RAW_CELL,
+        RAW_CELL,
+        RAW_CELL,
+        cellX,
+        0,
+        RAW_CELL,
+        RAW_CELL
+      );
+      continue;
+    }
+
+    const kCol = f % kickData.cols;
+    const kRow = Math.floor(f / kickData.cols);
+    const kb = measureCellBounds(kickData.canvas, f, kickData.cols);
+    const srcH = Math.max(24, kb.maxY - kb.minY + 1);
+    const squattedH = Math.round(srcH * 0.86);
+    const dstY = GROUNDED_FEET_Y - squattedH;
+    ctx.drawImage(
+      kickData.canvas,
+      kCol * RAW_CELL,
+      kRow * RAW_CELL + kb.minY,
+      RAW_CELL,
+      srcH,
+      cellX,
+      dstY,
+      RAW_CELL,
+      squattedH
+    );
+  }
+
+  return {
+    canvas: out,
+    frames,
+    cols,
+    rows: 1,
+    frameRate: 14,
+    isFallbackPose: false
+  };
 }
 
 async function loadArchetypeRawData(archetype: BaseArchetypeId): Promise<Map<SpriteActionKey, LoadedRawSheetData>> {
@@ -145,6 +460,15 @@ async function loadArchetypeRawData(archetype: BaseArchetypeId): Promise<Map<Spr
           });
         })
       );
+      const crouchEntry = map.get('crouch');
+      const punchEntry = map.get('light-punch');
+      const kickEntry = map.get('heavy-kick');
+      if (crouchEntry && punchEntry) {
+        map.set('crouch-punch', synthesizeCrouchPunchData(crouchEntry, punchEntry));
+      }
+      if (crouchEntry && kickEntry) {
+        map.set('sweep', synthesizeSweepData(kickEntry, crouchEntry));
+      }
       return map;
     }
 
@@ -191,14 +515,40 @@ async function loadArchetypeRawData(archetype: BaseArchetypeId): Promise<Map<Spr
     register('idle', idleSheet, 9, false);
     register('walk-forward', walkSheet, 11, !walk);
     register('walk-backward', reverseRawSheet(walkSheet), 11, !walk);
-    register('crouch', crouch ?? idleSheet, 10, !crouch);
+
+    const idleData = map.get('idle')!;
+    if (crouch) {
+      register('crouch', crouch, 14, false);
+    } else {
+      map.set('crouch', synthesizeTwoFootCrouchData(idleSheet.canvas, RAW_COLS, 'crouch'));
+    }
+    const crouchData = map.get('crouch')!;
+
     register('jump', jump ?? idleSheet, 10, !jump);
-    register('block-high', block ?? idleSheet, 10, !block);
-    register('block-low', block ?? crouch ?? idleSheet, 10, !block);
+    register('block-high', block ?? idleSheet, 12, !block);
+    if (block) {
+      register('block-low', block, 12, false);
+    } else if (crouch) {
+      register('block-low', crouch, 12, false);
+    } else {
+      map.set('block-low', synthesizeTwoFootCrouchData(idleSheet.canvas, RAW_COLS, 'blockLow'));
+    }
+
     register('hit-high', hit ?? idleSheet, 12, !hit);
     register('light-punch', punch ?? idleSheet, 15, !punch);
     register('heavy-kick', kick ?? punch ?? idleSheet, 13, !kick);
-    register('special-charge', crouch ?? idleSheet, 12, !crouch);
+
+    const punchData = map.get('light-punch') ?? idleData;
+    const kickData = map.get('heavy-kick') ?? punchData;
+    map.set('crouch-punch', synthesizeCrouchPunchData(crouchData, punchData));
+    map.set('sweep', synthesizeSweepData(kickData, crouchData));
+
+    if (crouch) {
+      register('special-charge', crouch, 12, false);
+    } else {
+      map.set('special-charge', synthesizeTwoFootCrouchData(idleSheet.canvas, RAW_COLS, 'charge'));
+    }
+
     register('special', special ?? kick ?? punch ?? idleSheet, 14, !special);
     register('knockdown', ko ?? hit ?? idleSheet, 10, !ko);
 

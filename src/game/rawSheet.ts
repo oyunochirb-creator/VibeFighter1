@@ -37,6 +37,7 @@ interface Pose {
   height: number;
   area: number;
   feetX: number;
+  label?: number;
 }
 
 /**
@@ -95,11 +96,11 @@ export function sliceRawSheet(image: HTMLImageElement, options: RawSheetOptions 
     mask[index] = pixels.data[index * 4 + 3] > 40 ? 1 : 0;
   }
 
-  const detected = findPoses(mask, width, height);
+  const segmented = extractConnectedPoses(mask, width, height);
   const poses = (
-    options.frames && options.frames !== detected.length
+    options.frames && options.frames !== segmented.poses.length
       ? splitEvenly(mask, width, height, options.frames)
-      : detected
+      : segmented.poses
   ).slice(0, MAX_FRAMES);
 
   if (poses.length === 0) {
@@ -129,6 +130,38 @@ export function sliceRawSheet(image: HTMLImageElement, options: RawSheetOptions 
     const cellX = (frame % RAW_COLS) * RAW_CELL;
     const cellY = Math.floor(frame / RAW_COLS) * RAW_CELL;
 
+    // Stamp ONLY pixels belonging to this connected pose so neighboring limbs
+    // inside overlapping bounding boxes never appear as ghost second sprites.
+    const isolated = makeCanvas(pose.width, pose.height);
+    const isoCtx = isolated.getContext('2d');
+    if (isoCtx) {
+      if (pose.label !== undefined) {
+        const isoImg = isoCtx.createImageData(pose.width, pose.height);
+        const dst = isoImg.data;
+        const src = pixels.data;
+        const lbls = segmented.labels;
+        const targetLbl = pose.label;
+        for (let py = 0; py < pose.height; py += 1) {
+          const sy = pose.y + py;
+          for (let px = 0; px < pose.width; px += 1) {
+            const sx = pose.x + px;
+            const sIdx = sy * width + sx;
+            if (lbls[sIdx] === targetLbl) {
+              const sOff = sIdx * 4;
+              const dOff = (py * pose.width + px) * 4;
+              dst[dOff] = src[sOff];
+              dst[dOff + 1] = src[sOff + 1];
+              dst[dOff + 2] = src[sOff + 2];
+              dst[dOff + 3] = src[sOff + 3];
+            }
+          }
+        }
+        isoCtx.putImageData(isoImg, 0, 0);
+      } else {
+        isoCtx.drawImage(source, pose.x, pose.y, pose.width, pose.height, 0, 0, pose.width, pose.height);
+      }
+    }
+
     context.save();
 
     if (options.flip) {
@@ -138,7 +171,7 @@ export function sliceRawSheet(image: HTMLImageElement, options: RawSheetOptions 
       context.translate(cellX, cellY);
     }
 
-    context.drawImage(source, pose.x, pose.y, pose.width, pose.height, left, top, drawWidth, drawHeight);
+    context.drawImage(isolated, 0, 0, pose.width, pose.height, left, top, drawWidth, drawHeight);
     context.restore();
 
     return {
@@ -294,47 +327,108 @@ function borderColour(data: Uint8ClampedArray, width: number, height: number): [
 }
 
 /**
- * Find the poses: split the image into rows of poses, then each row into
- * poses, using the empty background between them. Small specks and text
- * labels are ignored.
+ * Segments individual fighter poses in 2D via connected components (5x5 bridge)
+ * so extended fists or kicks overlapping in X with the next pose never merge two
+ * fighters into one frame. Small specks (< 15% of largest body area) are dropped.
  */
-function findPoses(mask: Uint8Array, width: number, height: number): Pose[] {
-  const rowCounts = new Array<number>(height).fill(0);
+export function extractConnectedPoses(
+  mask: Uint8Array,
+  width: number,
+  height: number
+): { poses: Pose[]; labels: Int32Array } {
+  const labels = new Int32Array(width * height);
+  const stack = new Int32Array(width * height);
+  const rawComps: Array<{
+    label: number;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    area: number;
+  }> = [];
+  let nextLabel = 1;
 
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
-      rowCounts[y] += mask[y * width + x];
-    }
-  }
+      const start = y * width + x;
+      if (!mask[start] || labels[start] !== 0) continue;
+      const label = nextLabel++;
+      let top = 0;
+      stack[top++] = start;
+      labels[start] = label;
+      let minX = x;
+      let maxX = x;
+      let minY = y;
+      let maxY = y;
+      let area = 0;
 
-  const bands = findRuns(rowCounts, Math.max(2, width * 0.003), Math.max(4, height * 0.015));
-  const tallestBand = Math.max(0, ...bands.map(([start, end]) => end - start));
-  const poses: Pose[] = [];
+      while (top > 0) {
+        const idx = stack[--top];
+        const cy = Math.floor(idx / width);
+        const cx = idx - cy * width;
+        area += 1;
+        if (cx < minX) minX = cx;
+        if (cx > maxX) maxX = cx;
+        if (cy < minY) minY = cy;
+        if (cy > maxY) maxY = cy;
 
-  bands
-    .filter(([start, end]) => end - start >= tallestBand * 0.3)
-    .forEach(([bandTop, bandBottom]) => {
-      const columnCounts = new Array<number>(width).fill(0);
-
-      for (let y = bandTop; y < bandBottom; y += 1) {
-        for (let x = 0; x < width; x += 1) {
-          columnCounts[x] += mask[y * width + x];
+        for (let dy = -2; dy <= 2; dy += 1) {
+          const ny = cy + dy;
+          if (ny < 0 || ny >= height) continue;
+          for (let dx = -2; dx <= 2; dx += 1) {
+            const nx = cx + dx;
+            if (nx < 0 || nx >= width) continue;
+            const nIdx = ny * width + nx;
+            if (mask[nIdx] && labels[nIdx] === 0) {
+              labels[nIdx] = label;
+              stack[top++] = nIdx;
+            }
+          }
         }
       }
 
-      findRuns(columnCounts, 2, Math.max(4, width * 0.01)).forEach(([left, right]) => {
-        const pose = measurePose(mask, width, left, right, bandTop, bandBottom);
-
-        if (pose) {
-          poses.push(pose);
-        }
+      rawComps.push({
+        label,
+        x: minX,
+        y: minY,
+        width: maxX - minX + 1,
+        height: maxY - minY + 1,
+        area
       });
-    });
+    }
+  }
 
-  const areas = poses.map((pose) => pose.area).sort((a, b) => a - b);
-  const medianArea = areas[Math.floor(areas.length / 2)] ?? 0;
+  const maxArea = Math.max(0, ...rawComps.map((c) => c.area));
+  const major = rawComps.filter((c) => c.area >= maxArea * 0.14);
 
-  return poses.filter((pose) => pose.area >= medianArea * 0.12);
+  // Reading order: top-to-bottom across vertical bands, left-to-right within each band
+  major.sort((a, b) => {
+    const overlapY = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y);
+    const minH = Math.min(a.height, b.height);
+    if (overlapY >= minH * 0.3) {
+      return a.x - b.x;
+    }
+    return a.y - b.y;
+  });
+
+  const poses: Pose[] = [];
+  for (const comp of major) {
+    const measured = measurePose(
+      mask,
+      width,
+      comp.x,
+      comp.x + comp.width,
+      comp.y,
+      comp.y + comp.height,
+      labels,
+      comp.label
+    );
+    if (measured) {
+      poses.push({ ...measured, label: comp.label });
+    }
+  }
+
+  return { poses, labels };
 }
 
 /** Split the image into equal-width cells and take the pose inside each. */
@@ -359,32 +453,6 @@ function splitEvenly(mask: Uint8Array, width: number, height: number, frames: nu
   return poses;
 }
 
-/** Runs of "filled" lines, merging runs separated by less than `minGap`. */
-function findRuns(counts: number[], minCount: number, minGap: number): Array<[number, number]> {
-  const runs: Array<[number, number]> = [];
-  let start = -1;
-
-  for (let index = 0; index <= counts.length; index += 1) {
-    const filled = index < counts.length && counts[index] >= minCount;
-
-    if (filled && start < 0) {
-      start = index;
-    } else if (!filled && start >= 0) {
-      const previous = runs[runs.length - 1];
-
-      if (previous && start - previous[1] < minGap) {
-        previous[1] = index;
-      } else {
-        runs.push([start, index]);
-      }
-
-      start = -1;
-    }
-  }
-
-  return runs;
-}
-
 /** Tight box, pixel count and feet centre of the pose inside a region. */
 function measurePose(
   mask: Uint8Array,
@@ -392,7 +460,9 @@ function measurePose(
   left: number,
   right: number,
   top: number,
-  bottom: number
+  bottom: number,
+  labels?: Int32Array,
+  targetLabel?: number
 ): Pose | null {
   let minX = right;
   let maxX = left - 1;
@@ -402,7 +472,9 @@ function measurePose(
 
   for (let y = top; y < bottom; y += 1) {
     for (let x = left; x < right; x += 1) {
-      if (mask[y * width + x]) {
+      const idx = y * width + x;
+      const matches = labels && targetLabel !== undefined ? labels[idx] === targetLabel : Boolean(mask[idx]);
+      if (matches) {
         area += 1;
         minX = Math.min(minX, x);
         maxX = Math.max(maxX, x);
@@ -423,7 +495,9 @@ function measurePose(
 
   for (let y = feetTop; y <= maxY; y += 1) {
     for (let x = minX; x <= maxX; x += 1) {
-      if (mask[y * width + x]) {
+      const idx = y * width + x;
+      const matches = labels && targetLabel !== undefined ? labels[idx] === targetLabel : Boolean(mask[idx]);
+      if (matches) {
         feetLeft = Math.min(feetLeft, x);
         feetRight = Math.max(feetRight, x);
       }

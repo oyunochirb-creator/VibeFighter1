@@ -210,4 +210,68 @@ describe('2.5D Fighter Rigs, Face/Outfit Variations, Tekken 7 Poses & Stages Cov
       'rooftop-sunset'
     ]);
   });
+
+  it('separates horizontally overlapping punch/kick poses into distinct single-fighter components', async () => {
+    const { extractConnectedPoses } = await import('../game/rawSheet');
+    const W = 240;
+    const H = 80;
+    const mask = new Uint8Array(W * H);
+    const fillRect = (x0: number, y0: number, x1: number, y1: number): void => {
+      for (let y = y0; y <= y1; y += 1) {
+        for (let x = x0; x <= x1; x += 1) {
+          mask[y * W + x] = 1;
+        }
+      }
+    };
+
+    // Pose 0 & 1 well separated
+    fillRect(10, 16, 40, 72);
+    fillRect(65, 16, 95, 72);
+    // Pose 2 reaches right with high punch/kick up to x=175 while Pose 3 foot starts at x=165!
+    // Vertical column projection overlaps in x=[165..175], yet in 2D space they are distinct fighters.
+    fillRect(120, 16, 152, 72);
+    fillRect(150, 22, 175, 32); // extended punch/kick limb
+    fillRect(165, 58, 180, 72); // Pose 3 front foot overlapping X=[165..175] below limb
+    fillRect(180, 16, 215, 72); // Pose 3 body
+
+    const result = extractConnectedPoses(mask, W, H);
+    expect(result.poses).toHaveLength(4);
+    expect(result.poses[2].x).toBe(120);
+    expect(result.poses[2].x + result.poses[2].width - 1).toBe(175);
+    expect(result.poses[3].x).toBe(165);
+    expect(result.poses[3].x + result.poses[3].width - 1).toBe(215);
+  });
+
+  it('keeps crouch, crouchLight, blockLow, and lightPunch grounded cleanly on y>=0 without vertical squashing', async () => {
+    const {
+      SPRITE_PLANE_SIZE,
+      computeGroundedPlaneY,
+      resolvePoseFrameIndex
+    } = await import('./fighterRig3d');
+
+    for (const pose of ['idle', 'crouch', 'crouchLight', 'blockLow', 'lightPunch', 'sweep', 'ko'] as const) {
+      for (const bottomY of [227, 229, 236, 242, 255]) {
+        const planeY = computeGroundedPlaneY(bottomY, pose);
+        const feetWorldY = planeY + SPRITE_PLANE_SIZE * ((255 - bottomY) / 256 - 0.5);
+        expect(feetWorldY).toBeGreaterThanOrEqual(-1e-6);
+      }
+    }
+
+    // Held crouch advances cleanly from startup frame 0 to grounded low squat frame 4
+    expect(resolvePoseFrameIndex('crouch', 5, 14, 0, 0, 0)).toBe(0);
+    expect(resolvePoseFrameIndex('crouch', 5, 14, 0, 0.2, 0.2)).toBeGreaterThanOrEqual(2);
+    expect(resolvePoseFrameIndex('crouch', 5, 14, 0, 0.5, 0.5)).toBe(4);
+
+    // Live rig maintains un-squashed scale.y === 1 and feet >= 0 across crouch & punch poses
+    const dummyTex = new THREE.Texture();
+    const rig = createFighterRig3D('mongol-bokh', dummyTex);
+    const plane = rig.model.children.find((c) => c instanceof THREE.Mesh) as THREE.Mesh;
+    for (const pose of ['crouch', 'crouchLight', 'blockLow', 'lightPunch', 'heavyKick', 'sweep'] as const) {
+      rig.updatePose(0.05, pose, 0.5, 1.2, 0, 1);
+      expect(plane.scale.y).toBe(1);
+      const feetWorldY = plane.position.y + SPRITE_PLANE_SIZE * ((255 - 229) / 256 - 0.5);
+      expect(feetWorldY).toBeGreaterThanOrEqual(-1e-6);
+    }
+    dummyTex.dispose();
+  });
 });

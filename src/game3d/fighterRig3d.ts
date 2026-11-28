@@ -82,6 +82,50 @@ export interface FighterRig3D {
   getRightHandWorldPosition: (target: THREE.Vector3) => THREE.Vector3;
 }
 
+export const SPRITE_PLANE_SIZE = 2.38;
+
+/**
+ * Computes the sprite plane center Y (in meters) that keeps the frame's lowest
+ * opaque pixel (`bottomY` in 0..255) flush on or above the arena floor (`y >= 0`).
+ */
+export function computeGroundedPlaneY(bottomY: number, pose: FighterPoseState): number {
+  const clamped = Math.max(227, Math.min(255, bottomY));
+  // Airborne kick/special tuck frames still lift cleanly while grounded feet never dip < 0
+  if (pose === 'ko' || pose === 'liverDowned') {
+    return SPRITE_PLANE_SIZE * (0.5 - (255 - Math.max(229, clamped)) / 256);
+  }
+  return SPRITE_PLANE_SIZE * (0.5 - (255 - clamped) / 256);
+}
+
+/**
+ * Resolves the active frame index for both looping moves and held one-shot
+ * poses (crouch, low block, jump, hit, knockdown) so crouch holds smoothly
+ * on its final low squat frame instead of freezing on frame 0 upright.
+ */
+export function resolvePoseFrameIndex(
+  pose: FighterPoseState,
+  entryFrames: number,
+  frameRate: number,
+  poseProgress: number,
+  poseElapsedSec: number,
+  globalElapsedSec: number
+): number {
+  const safeFrames = Math.max(1, entryFrames);
+  if (safeFrames === 1) {
+    return 0;
+  }
+  if (isOneShotPose(pose)) {
+    if (poseProgress > 0) {
+      const p = THREE.MathUtils.clamp(poseProgress, 0, 0.999);
+      return Math.min(safeFrames - 1, Math.floor(p * safeFrames));
+    }
+    const naturalProgress = THREE.MathUtils.clamp((poseElapsedSec * frameRate) / safeFrames, 0, 0.999);
+    return Math.min(safeFrames - 1, Math.floor(naturalProgress * safeFrames));
+  }
+  const rate = pose === 'dash' || pose === 'sidestep' ? frameRate * 1.45 : frameRate;
+  return Math.floor(globalElapsedSec * rate) % safeFrames;
+}
+
 function mapPoseToAction(pose: FighterPoseState): SpriteActionKey {
   switch (pose) {
     case 'idle':
@@ -98,6 +142,8 @@ function mapPoseToAction(pose: FighterPoseState): SpriteActionKey {
     case 'duckUnder':
     case 'choker':
       return 'crouch';
+    case 'crouchLight':
+      return 'crouch-punch';
     case 'jump':
       return 'jump';
     case 'blockHigh':
@@ -112,12 +158,12 @@ function mapPoseToAction(pose: FighterPoseState): SpriteActionKey {
     case 'liverDowned':
       return 'knockdown';
     case 'lightPunch':
-    case 'crouchLight':
     case 'throw':
     case 'icyBodyShot':
       return 'light-punch';
-    case 'heavyKick':
     case 'sweep':
+      return 'sweep';
+    case 'heavyKick':
     case 'frontKick':
     case 'spinHookKick':
     case 'spin360Kick':
@@ -252,48 +298,50 @@ export function createFighterRig3D(characterId: string, contactShadowTex: THREE.
     side: THREE.DoubleSide
   });
 
-  const spritePlane = new THREE.Mesh(new THREE.PlaneGeometry(2.38, 2.38), spriteMat);
-  spritePlane.position.y = 0.935;
+  const spritePlane = new THREE.Mesh(new THREE.PlaneGeometry(SPRITE_PLANE_SIZE, SPRITE_PLANE_SIZE), spriteMat);
+  spritePlane.position.y = computeGroundedPlaneY(229, 'idle');
   spritePlane.visible = false; // Revealed immediately once sprite sheet resolves
   model.add(spritePlane);
 
   const tintOverlayMatList: THREE.MeshStandardMaterial[] = [spriteMat];
 
-  // Per-rig Texture Cache so mirror matches & disposeObject3D are 100% isolated
-  const actionTextureMap = new Map<SpriteActionKey, THREE.CanvasTexture>();
+  // Isolated per-frame Texture Cache so zero UV bleed or double-sprite slivers occur
+  const frameTextureMap = new Map<string, THREE.CanvasTexture>();
   let spritePack: FighterSpritePack25D | null = null;
-  let activeActionKey: SpriteActionKey | null = null;
+  let activeFrameKey: string | null = null;
+
+  const getRigFrameTexture = (action: SpriteActionKey, frameIdx: number, frameCanvas: HTMLCanvasElement): THREE.CanvasTexture => {
+    const key = `${action}:${frameIdx}`;
+    let tex = frameTextureMap.get(key);
+    if (!tex) {
+      tex = new THREE.CanvasTexture(frameCanvas);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.generateMipmaps = false;
+      tex.minFilter = THREE.LinearFilter;
+      tex.magFilter = THREE.LinearFilter;
+      tex.wrapS = THREE.ClampToEdgeWrapping;
+      tex.wrapT = THREE.ClampToEdgeWrapping;
+      tex.needsUpdate = true;
+      frameTextureMap.set(key, tex);
+    }
+    return tex;
+  };
 
   let isDisposed = false;
   void loadFighterSpritePack25D(characterId).then((pack) => {
     if (pack && !isDisposed) {
       spritePack = pack;
       const idleEntry = pack.getAction('idle');
-      const tex = getRigActionTexture('idle', idleEntry.canvas, idleEntry.cols, idleEntry.rows);
-      activeActionKey = 'idle';
+      const f0 = idleEntry.frameList[0];
+      const tex = getRigFrameTexture('idle', 0, f0 ? f0.canvas : idleEntry.canvas);
+      activeFrameKey = 'idle:0';
       spriteMat.map = tex;
       spriteMat.emissiveMap = tex;
       spriteMat.needsUpdate = true;
+      spritePlane.position.y = computeGroundedPlaneY(f0 ? f0.bottomY : 229, 'idle');
       spritePlane.visible = true;
     }
   });
-
-  const getRigActionTexture = (action: SpriteActionKey, canvas: HTMLCanvasElement, cols: number, rows: number): THREE.CanvasTexture => {
-    let tex = actionTextureMap.get(action);
-    if (!tex) {
-      tex = new THREE.CanvasTexture(canvas);
-      tex.colorSpace = THREE.SRGBColorSpace;
-      tex.minFilter = THREE.LinearMipmapLinearFilter;
-      tex.magFilter = THREE.LinearFilter;
-      tex.anisotropy = 4;
-      tex.wrapS = THREE.ClampToEdgeWrapping;
-      tex.wrapT = THREE.ClampToEdgeWrapping;
-      tex.repeat.set(1 / cols, 1 / rows);
-      tex.needsUpdate = true;
-      actionTextureMap.set(action, tex);
-    }
-    return tex;
-  };
 
   let currentFacing: 1 | -1 = 1;
   let turntableMode = false;
@@ -303,6 +351,9 @@ export function createFighterRig3D(characterId: string, contactShadowTex: THREE.
   let wasVictory = false;
   let victoryElapsed = 0;
   let flashOverrideColor: number | null = null;
+  let lastPose: FighterPoseState = 'idle';
+  let poseElapsedSec = 0;
+  let smoothedExtraLiftY = 0;
 
   const setFacing = (facing: 1 | -1): void => {
     currentFacing = facing;
@@ -377,58 +428,61 @@ export function createFighterRig3D(characterId: string, contactShadowTex: THREE.
     heightAboveGround: number,
     scale = 1
   ): void => {
+    if (pose !== lastPose) {
+      lastPose = pose;
+      poseElapsedSec = 0;
+    } else {
+      poseElapsedSec += dt;
+    }
+
     const lift = THREE.MathUtils.clamp(heightAboveGround / 2.2, 0, 1);
     shadow.scale.setScalar((1 - lift * 0.45) * scale);
     (shadow.material as THREE.MeshBasicMaterial).opacity = 0.6 - lift * 0.36;
-    model.scale.setScalar(scale);
 
     const action = mapPoseToAction(pose);
     let isFallbackPose = false;
+    let frameBottomY = 229;
 
     if (spritePack) {
       const entry = spritePack.getAction(action);
       isFallbackPose = entry.isFallbackPose;
-      const tex = getRigActionTexture(action, entry.canvas, entry.cols, entry.rows);
+      const frameIdx = resolvePoseFrameIndex(pose, entry.frames, entry.frameRate, poseProgress, poseElapsedSec, elapsedSec);
+      const frameObj = entry.frameList[frameIdx] ?? entry.frameList[0];
+      if (frameObj) {
+        frameBottomY = frameObj.bottomY;
+      }
 
-      if (activeActionKey !== action || spriteMat.map !== tex) {
-        activeActionKey = action;
+      const key = `${action}:${frameIdx}`;
+      const tex = getRigFrameTexture(action, frameIdx, frameObj ? frameObj.canvas : entry.canvas);
+      if (activeFrameKey !== key || spriteMat.map !== tex) {
+        activeFrameKey = key;
         spriteMat.map = tex;
         spriteMat.emissiveMap = tex;
         spriteMat.needsUpdate = true;
       }
       spritePlane.visible = true;
-
-      let frameIdx = 0;
-      if (isOneShotPose(pose) && entry.frames > 1) {
-        const p = THREE.MathUtils.clamp(poseProgress, 0, 0.999);
-        frameIdx = Math.min(entry.frames - 1, Math.floor(p * entry.frames));
-      } else {
-        const rate = pose === 'dash' || pose === 'sidestep' ? entry.frameRate * 1.45 : entry.frameRate;
-        frameIdx = Math.floor(elapsedSec * rate) % entry.frames;
-      }
-
-      const col = frameIdx % entry.cols;
-      const row = Math.floor(frameIdx / entry.cols);
-      tex.offset.set(col / entry.cols, (entry.rows - 1 - row) / entry.rows);
     }
 
-    // Dynamic 2.5D spatial motion layered cleanly on top of the spritesheet frames
-    let planeY = 0.935;
+    // Never vertically squash or sink spritePlane below y=0
+    spritePlane.scale.y = 1;
+    let basePlaneY = computeGroundedPlaneY(frameBottomY, pose);
+    let extraLiftY = 0;
+    let planeShiftX = 0;
     let rotY = turntableMode ? turntableYaw : 0;
     let rotZ = 0;
-    let rotX = 0;
+    const rotX = 0;
     let headY = 0.28;
 
-    if (pose === 'crouch' || pose === 'blockLow' || pose === 'duckUnder' || pose === 'choker' || pose === 'trapped') {
+    if (
+      pose === 'crouch' ||
+      pose === 'crouchLight' ||
+      pose === 'blockLow' ||
+      pose === 'sweep' ||
+      pose === 'duckUnder' ||
+      pose === 'choker' ||
+      pose === 'trapped'
+    ) {
       headY = -0.15;
-      if (isFallbackPose) {
-        planeY = 0.72;
-        spritePlane.scale.y = 0.82;
-      } else {
-        spritePlane.scale.y = 1;
-      }
-    } else {
-      spritePlane.scale.y = 1;
     }
 
     let effectiveScale = scale;
@@ -440,16 +494,14 @@ export function createFighterRig3D(characterId: string, contactShadowTex: THREE.
         applyBaseEmissive();
       }
       victoryElapsed += dt;
-    } else {
-      if (wasVictory) {
-        wasVictory = false;
-        victoryElapsed = 0;
-        applyBaseEmissive();
-      }
+    } else if (wasVictory) {
+      wasVictory = false;
+      victoryElapsed = 0;
+      applyBaseEmissive();
     }
 
     if (pose === 'icyCharge') {
-      rotZ = currentFacing * 0.14;
+      rotZ = currentFacing * 0.1;
       wasIcyCharge = true;
       spriteMat.color.setHex(0xbae6fd);
       spriteMat.emissive.setHex(0x38bdf8);
@@ -459,22 +511,33 @@ export function createFighterRig3D(characterId: string, contactShadowTex: THREE.
         wasIcyCharge = false;
         applyBaseEmissive();
       }
-      if (pose === 'sidestep') {
-        rotZ = Math.sin(elapsedSec * 16) * 0.1 * currentFacing;
+      if (pose === 'lightPunch' || pose === 'crouchLight') {
+        const snap = Math.sin(THREE.MathUtils.clamp(poseProgress, 0, 1) * Math.PI);
+        planeShiftX = currentFacing * 0.09 * snap;
+        rotZ = -currentFacing * 0.055 * snap;
+      } else if (pose === 'icyBodyShot' || pose === 'spiritStrike' || pose === 'weaponSlash' || pose === 'throw') {
+        const snap = Math.sin(THREE.MathUtils.clamp(poseProgress, 0, 1) * Math.PI);
+        planeShiftX = currentFacing * 0.14 * snap;
+        rotZ = -currentFacing * 0.085 * snap;
+      } else if (pose === 'heavyKick' || pose === 'frontKick' || pose === 'sweep') {
+        const snap = Math.sin(THREE.MathUtils.clamp(poseProgress, 0, 1) * Math.PI);
+        planeShiftX = currentFacing * 0.11 * snap;
+      } else if (pose === 'sidestep') {
+        rotZ = Math.sin(elapsedSec * 16) * 0.09 * currentFacing;
       } else if (pose === 'hit') {
-        rotZ = currentFacing * 0.16;
+        rotZ = currentFacing * 0.13;
       } else if (pose === 'ko' || pose === 'liverDowned') {
         headY = -0.75;
         if (isFallbackPose || pose === 'liverDowned') {
           rotZ = currentFacing * Math.PI * 0.44;
-          planeY = 0.34;
+          basePlaneY = 0.44;
         }
       } else if (pose === 'slammed') {
         if (poseProgress < 0.72) {
-          planeY = 0.935 + Math.sin((poseProgress / 0.72) * (Math.PI / 2)) * 1.3;
+          extraLiftY = Math.sin((poseProgress / 0.72) * (Math.PI / 2)) * 1.3;
           rotZ = currentFacing * (poseProgress / 0.72) * Math.PI * 0.88;
         } else {
-          planeY = 0.34;
+          basePlaneY = 0.44;
           rotZ = currentFacing * Math.PI * 0.46;
         }
       } else if (
@@ -494,25 +557,32 @@ export function createFighterRig3D(characterId: string, contactShadowTex: THREE.
                 : 1.2;
         rotY = currentFacing * poseProgress * Math.PI * turns;
       } else if (pose === 'rageArt') {
-        rotZ = -currentFacing * 0.12 * Math.sin(poseProgress * Math.PI);
+        rotZ = -currentFacing * 0.1 * Math.sin(poseProgress * Math.PI);
       } else if (pose === 'victory') {
         const leapDur = 0.48;
         if (victoryElapsed < leapDur) {
           const t = victoryElapsed / leapDur;
-          planeY = 0.935 + Math.sin(t * Math.PI) * 0.28;
-          rotZ = -currentFacing * 0.08 * Math.sin(t * Math.PI);
+          extraLiftY = Math.sin(t * Math.PI) * 0.28;
+          rotZ = -currentFacing * 0.07 * Math.sin(t * Math.PI);
           effectiveScale = scale * (1 + 0.08 * Math.sin(t * Math.PI));
         } else {
           const swayT = victoryElapsed - leapDur;
-          planeY = 0.935 + Math.abs(Math.sin(swayT * 4.2)) * 0.05;
+          extraLiftY = Math.abs(Math.sin(swayT * 4.2)) * 0.05;
           rotZ = -currentFacing * 0.03;
           effectiveScale = scale * 1.05;
         }
       }
     }
 
+    // Compensate any body tilt around feet pivot so boots/ankles never dip below y=0
+    if (pose !== 'ko' && pose !== 'liverDowned' && pose !== 'slammed' && rotZ !== 0) {
+      extraLiftY += Math.abs(Math.sin(rotZ)) * 0.18;
+    }
+
+    smoothedExtraLiftY = THREE.MathUtils.damp(smoothedExtraLiftY, extraLiftY, 18, dt);
     model.scale.setScalar(effectiveScale);
-    spritePlane.position.y = THREE.MathUtils.damp(spritePlane.position.y, planeY, 18, dt);
+    spritePlane.position.y = basePlaneY + Math.max(0, smoothedExtraLiftY);
+    spritePlane.position.x = THREE.MathUtils.damp(spritePlane.position.x, planeShiftX, 20, dt);
     model.rotation.x = THREE.MathUtils.damp(model.rotation.x, rotX, 18, dt);
     model.rotation.y =
       pose === 'spinHookKick' ||
@@ -539,10 +609,10 @@ export function createFighterRig3D(characterId: string, contactShadowTex: THREE.
   // Guard against stray late texture hydration and dispose all cached action textures cleanly
   root.userData.onDispose = () => {
     isDisposed = true;
-    for (const tex of actionTextureMap.values()) {
+    for (const tex of frameTextureMap.values()) {
       tex.dispose();
     }
-    actionTextureMap.clear();
+    frameTextureMap.clear();
   };
 
   setFacing(1);
